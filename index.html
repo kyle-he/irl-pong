@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>FACE PONG 3D</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; color: #0ff; }
+  #ui { position: fixed; top: 0; left: 0; right: 0; text-align: center; padding: 20px; z-index: 10; pointer-events: none; }
+  #score { font-size: 42px; font-weight: bold; text-shadow: 0 0 10px #0ff; }
+  #status { font-size: 16px; margin-top: 6px; }
+  #lobby { position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+  #lobby h1 { font-size: 48px; text-shadow: 0 0 20px #0ff; margin: 0; }
+  button, input { font-family: inherit; font-size: 18px; padding: 12px 24px; background: #001a1a; color: #0ff; border: 2px solid #0ff; cursor: pointer; border-radius: 4px; }
+  button:hover { background: #0ff; color: #000; }
+  input { width: 220px; text-align: center; text-transform: uppercase; }
+  #roomCode { font-size: 36px; letter-spacing: 8px; color: #ff0; text-shadow: 0 0 10px #ff0; }
+  .hidden { display: none !important; }
+  #flash { position: fixed; inset: 0; pointer-events: none; z-index: 5; opacity: 0; background: radial-gradient(circle, transparent 40%, #f0f 100%); transition: opacity 0.4s; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="score">0 — 0</div>
+  <div id="status"></div>
+</div>
+<div id="flash"></div>
+<div id="lobby">
+  <h1>FACE PONG 3D</h1>
+  <div id="menu">
+    <button id="hostBtn">HOST GAME</button>
+    &nbsp;&nbsp;
+    <input id="joinInput" placeholder="ROOM CODE" maxlength="4">
+    <button id="joinBtn">JOIN</button>
+  </div>
+  <div id="hostInfo" class="hidden">
+    <div>Tell your opponent the room code:</div>
+    <div id="roomCode"></div>
+    <div style="margin-top:10px">Waiting for opponent...</div>
+  </div>
+  <div id="lobbyStatus" style="color:#888"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<script>
+// ============ CONSTANTS ============
+const BOX = { w: 10, h: 6, d: 20 };          // play box half-extents: x±5, y±3, z±10
+const PADDLE = { w: 3, h: 2 };
+const PADDLE_Z = BOX.d / 2 - 0.5;             // paddles near each end
+const BALL_R = 0.35;
+const BASE_SPEED = 14;
+
+// ============ STATE ============
+let peer, conn, isHost = false, connected = false;
+let myScore = 0, theirScore = 0;
+let ball = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0 };
+let myPaddle = { x: 0, y: 0 };
+let theirPaddle = { x: 0, y: 0 };
+let ballLive = false;
+
+// ============ LOBBY / NETWORKING ============
+const $ = id => document.getElementById(id);
+function code4() { return Array.from({length:4}, () => "ABCDEFGHJKLMNPQRSTUVWXYZ"[Math.floor(Math.random()*24)]).join(""); }
+
+let localStream = null;
+async function getCam() {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 }, audio: false });
+  } catch (e) { $("lobbyStatus").textContent = "Webcam blocked — playing without video"; }
+}
+
+function makePeer(id) {
+  peer = new Peer(id ? "facepong-" + id : undefined);
+  peer.on("error", e => $("lobbyStatus").textContent = "Error: " + e.type);
+  peer.on("call", call => {           // incoming webcam stream
+    call.answer(localStream || undefined);
+    call.on("stream", s => attachRemoteVideo(s));
+  });
+  return peer;
+}
+
+$("hostBtn").onclick = async () => {
+  isHost = true;
+  $("menu").classList.add("hidden");
+  $("hostInfo").classList.remove("hidden");
+  const code = code4();
+  $("roomCode").textContent = code;
+  await getCam();
+  makePeer(code);
+  peer.on("open", () => {
+    peer.on("connection", c => {
+      conn = c;
+      conn.on("open", () => {
+        if (localStream) peer.call(conn.peer, localStream);
+        startGame();
+      });
+      conn.on("data", onData);
+    });
+  });
+};
+
+$("joinBtn").onclick = async () => {
+  const code = $("joinInput").value.trim().toUpperCase();
+  if (code.length !== 4) return;
+  $("lobbyStatus").textContent = "Connecting...";
+  await getCam();
+  makePeer(null);
+  peer.on("open", () => {
+    conn = peer.connect("facepong-" + code);
+    conn.on("open", () => {
+      if (localStream) peer.call("facepong-" + code, localStream);
+      startGame();
+    });
+    conn.on("data", onData);
+  });
+};
+
+function onData(d) {
+  if (d.t === "p") { theirPaddle.x = -d.x; theirPaddle.y = d.y; }   // mirror x
+  if (d.t === "s" && !isHost) {                                     // full state from host (mirrored z)
+    ball.x = -d.bx; ball.y = d.by; ball.z = -d.bz;
+    ballLive = d.live;
+    myScore = d.gs; theirScore = d.hs;
+    updateScore();
+  }
+  if (d.t === "hit") flash();
+}
+
+function startGame() {
+  connected = true;
+  $("lobby").classList.add("hidden");
+  $("status").textContent = isHost ? "You are HOST" : "Connected!";
+  setTimeout(() => $("status").textContent = "Move mouse to control paddle", 100);
+  if (isHost) setTimeout(serveBall, 2000);
+}
+
+function serveBall() {
+  ball.x = 0; ball.y = 0; ball.z = 0;
+  const a = (Math.random() - 0.5) * 0.8, b = (Math.random() - 0.5) * 0.6;
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  ball.vx = Math.sin(a) * BASE_SPEED;
+  ball.vy = Math.sin(b) * BASE_SPEED * 0.5;
+  ball.vz = Math.cos(a) * BASE_SPEED * dir;
+  ballLive = true;
+}
+
+function updateScore() { $("score").textContent = myScore + " — " + theirScore; }
+function flash() { const f = $("flash"); f.style.opacity = 1; setTimeout(() => f.style.opacity = 0, 150); }
+
+// ============ THREE.JS SCENE ============
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x000011, 25, 60);
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 1.5, BOX.d/2 + 7);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+addEventListener("resize", () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+scene.add(new THREE.AmbientLight(0x404060));
+const pl = new THREE.PointLight(0xffffff, 1.2, 100); pl.position.set(0, 8, 10); scene.add(pl);
+const ballLight = new THREE.PointLight(0xff00ff, 1.5, 15); scene.add(ballLight);
+
+// Wireframe box tunnel
+const boxGeo = new THREE.BoxGeometry(BOX.w, BOX.h, BOX.d);
+scene.add(new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo), new THREE.LineBasicMaterial({ color: 0x00ffff })));
+// depth rings
+for (let z = -BOX.d/2; z <= BOX.d/2; z += 2.5) {
+  const ring = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.PlaneGeometry(BOX.w, BOX.h)),
+    new THREE.LineBasicMaterial({ color: 0x004455 }));
+  ring.position.z = z; scene.add(ring);
+}
+// floor grid
+const grid = new THREE.GridHelper(40, 40, 0x003344, 0x001a22);
+grid.position.y = -BOX.h/2 - 0.01; scene.add(grid);
+
+// Ball
+const ballMesh = new THREE.Mesh(new THREE.SphereGeometry(BALL_R, 24, 24),
+  new THREE.MeshPhongMaterial({ color: 0xff00ff, emissive: 0xaa00aa }));
+scene.add(ballMesh);
+
+// Paddles
+function makePaddle(color) {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshPhongMaterial({ color, transparent: true, opacity: 0.35, emissive: color, emissiveIntensity: 0.3, side: THREE.DoubleSide });
+  g.add(new THREE.Mesh(new THREE.PlaneGeometry(PADDLE.w, PADDLE.h), mat));
+  g.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(PADDLE.w, PADDLE.h)),
+    new THREE.LineBasicMaterial({ color })));
+  return g;
+}
+const myPad = makePaddle(0x00ff88);  myPad.position.z = PADDLE_Z;  scene.add(myPad);
+const theirPad = makePaddle(0xff8800); theirPad.position.z = -PADDLE_Z; scene.add(theirPad);
+
+// Opponent webcam plane on far wall
+const videoEl = document.createElement("video");
+videoEl.autoplay = true; videoEl.playsInline = true; videoEl.muted = true;
+function attachRemoteVideo(stream) {
+  videoEl.srcObject = stream;
+  videoEl.play().catch(()=>{});
+  const tex = new THREE.VideoTexture(videoEl);
+  const face = new THREE.Mesh(new THREE.PlaneGeometry(BOX.w, BOX.h),
+    new THREE.MeshBasicMaterial({ map: tex }));
+  face.position.z = -BOX.d/2 - 0.05;
+  face.scale.x = -1;   // mirror so it feels face-to-face
+  scene.add(face);
+}
+
+// ============ INPUT ============
+const ray = new THREE.Raycaster();
+const paddlePlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -PADDLE_Z);
+const hitPt = new THREE.Vector3();
+addEventListener("mousemove", e => {
+  const m = new THREE.Vector2((e.clientX/innerWidth)*2 - 1, -(e.clientY/innerHeight)*2 + 1);
+  ray.setFromCamera(m, camera);
+  if (ray.ray.intersectPlane(paddlePlane, hitPt)) {
+    myPaddle.x = THREE.MathUtils.clamp(hitPt.x, -BOX.w/2 + PADDLE.w/2, BOX.w/2 - PADDLE.w/2);
+    myPaddle.y = THREE.MathUtils.clamp(hitPt.y, -BOX.h/2 + PADDLE.h/2, BOX.h/2 - PADDLE.h/2);
+  }
+});
+
+// ============ GAME LOOP ============
+let last = performance.now();
+function paddleHit(p, bx, by) {
+  return Math.abs(bx - p.x) < PADDLE.w/2 + BALL_R && Math.abs(by - p.y) < PADDLE.h/2 + BALL_R;
+}
+function physics(dt) {   // host only; host's frame: my paddle at +z, guest at -z
+  if (!ballLive) return;
+  ball.x += ball.vx * dt; ball.y += ball.vy * dt; ball.z += ball.vz * dt;
+  if (Math.abs(ball.x) > BOX.w/2 - BALL_R) { ball.vx *= -1; ball.x = Math.sign(ball.x)*(BOX.w/2 - BALL_R); }
+  if (Math.abs(ball.y) > BOX.h/2 - BALL_R) { ball.vy *= -1; ball.y = Math.sign(ball.y)*(BOX.h/2 - BALL_R); }
+
+  if (ball.z > PADDLE_Z - BALL_R && ball.vz > 0) {           // reaching host side
+    if (paddleHit(myPaddle, ball.x, ball.y)) {
+      ball.vz = -Math.abs(ball.vz) * 1.06;
+      ball.vx += (ball.x - myPaddle.x) * 3;
+      ball.vy += (ball.y - myPaddle.y) * 3;
+      ball.z = PADDLE_Z - BALL_R;
+      flash(); if (conn) conn.send({ t: "hit" });
+    } else if (ball.z > BOX.d/2) { theirScore++; scoreAndReset(); }
+  }
+  if (ball.z < -PADDLE_Z + BALL_R && ball.vz < 0) {          // reaching guest side
+    if (paddleHit(theirPaddle, ball.x, ball.y)) {
+      ball.vz = Math.abs(ball.vz) * 1.06;
+      ball.vx += (ball.x - theirPaddle.x) * 3;
+      ball.vy += (ball.y - theirPaddle.y) * 3;
+      ball.z = -PADDLE_Z + BALL_R;
+      flash(); if (conn) conn.send({ t: "hit" });
+    } else if (ball.z < -BOX.d/2) { myScore++; scoreAndReset(); }
+  }
+}
+function scoreAndReset() { ballLive = false; updateScore(); setTimeout(serveBall, 1500); }
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+
+  if (connected) {
+    if (isHost) {
+      physics(dt);
+      conn.send({ t: "p", x: myPaddle.x, y: myPaddle.y });
+      conn.send({ t: "s", bx: ball.x, by: ball.y, bz: ball.z, live: ballLive, hs: myScore, gs: theirScore });
+    } else {
+      conn.send({ t: "p", x: myPaddle.x, y: myPaddle.y });
+    }
+  }
+
+  myPad.position.x += (myPaddle.x - myPad.position.x) * 0.5;
+  myPad.position.y += (myPaddle.y - myPad.position.y) * 0.5;
+  theirPad.position.x += (theirPaddle.x - theirPad.position.x) * 0.3;
+  theirPad.position.y += (theirPaddle.y - theirPad.position.y) * 0.3;
+
+  ballMesh.visible = ballLive;
+  ballMesh.position.set(ball.x, ball.y, ball.z);
+  ballLight.position.copy(ballMesh.position);
+
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
