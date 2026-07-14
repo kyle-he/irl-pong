@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(gh auth)",
+      "Exec(git init)",
+      "Exec(gh repo)",
+      "Exec(gh api)",
+      "Exec(sleep)",
+      "Exec(node)",
+      "Exec(git add)"
+    ]
+  }
+}
