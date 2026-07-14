@@ -7,7 +7,14 @@
       "Exec(gh api)",
       "Exec(sleep)",
       "Exec(node)",
-      "Exec(git add)"
+      "Exec(git add)",
+      "Exec(npx playwright)",
+      "Exec(ls)",
+      "Exec(mkdir)",
+      "Exec(python3)",
+      "Exec(find)",
+      "Exec(sed)",
+      "Exec(pkill)"
     ]
   }
 }

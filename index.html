@@ -75,6 +75,7 @@ const PAD_R = R - 0.6;       // paddle plane distance from center
 const PADDLE = { w: 3, h: 2 };
 const BALL_R = 0.35;
 const BASE_SPEED = 12;
+const MAX_SPEED = 26;
 const MAX_LIVES = 5;
 const SEAT_ANGLE = [0, Math.PI, Math.PI/2, -Math.PI/2];   // seat 0..3 wall directions
 const SEAT_COLOR = [0x6ee76e, 0xff9f43, 0x66c2ff, 0xff5e9c];
@@ -300,12 +301,17 @@ document.body.appendChild(renderer.domElement);
 addEventListener("resize", () => {
   camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  setupSeatView();
 });
 
 function setupSeatView() {
-  const pos = rotY(new THREE.Vector3(0, 2.2, R + 7.5), SEAT_ANGLE[mySeat]);
+  // pick a camera distance so the whole arena fits on screen for this aspect ratio
+  const vfov = THREE.MathUtils.degToRad(camera.fov) / 2;
+  const hfov = Math.atan(Math.tan(vfov) * camera.aspect);
+  const d = Math.max((R + 1.2) / Math.tan(hfov), (H + 2.2) / Math.tan(vfov));
+  const pos = rotY(new THREE.Vector3(0, 2.0, R + d), SEAT_ANGLE[mySeat]);
   camera.position.copy(pos);
-  camera.lookAt(0, 0, 0);
+  camera.lookAt(0, -0.9, 0);
 }
 setupSeatView();
 
@@ -398,10 +404,16 @@ function physics(dt) {
     const defended = seatActive(s) && lives[s] > 0;
     if (defended && lb.z > PAD_R - BALL_R) {
       const [pu, pv] = pads[s];
-      if (Math.abs(lb.x - pu) < PADDLE.w/2 + BALL_R && Math.abs(lb.y - pv) < PADDLE.h/2 + BALL_R && lb.z < PAD_R + BALL_R*2) {
+      if (Math.abs(lb.x - pu) < PADDLE.w/2 + BALL_R && Math.abs(lb.y - pv) < PADDLE.h/2 + BALL_R) {
         lv.z = -Math.abs(lv.z) * 1.05;
         lv.x += (lb.x - pu) * 3;
         lv.y += (lb.y - pv) * 3;
+        // keep depth speed dominant so rallies stay snappy, and cap total speed
+        const speed = Math.min(lv.length(), MAX_SPEED);
+        const maxLat = Math.abs(lv.z) * 0.85;
+        lv.x = THREE.MathUtils.clamp(lv.x, -maxLat, maxLat);
+        lv.y = THREE.MathUtils.clamp(lv.y, -maxLat * 0.6, maxLat * 0.6);
+        lv.setLength(speed);
         lb.z = PAD_R - BALL_R;
         ball.copy(rotY(lb, SEAT_ANGLE[s]));
         ballV.copy(rotY(lv, SEAT_ANGLE[s]));
@@ -466,6 +478,7 @@ function animate(now) {
   renderer.render(scene, camera);
 }
 requestAnimationFrame(animate);
+window.__dbg = () => ({ phase, ball: ball.toArray(), lives: lives.slice(), live: ballLive, seat: mySeat, players: players.length });
 </script>
 </body>
 </html>
